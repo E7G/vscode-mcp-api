@@ -1,4 +1,6 @@
 # vscode-mcp-api（VS Code MCP 桥接）
+
+> 独立 C++/Qt Widgets 桌面版（无需 VS Code，含托盘、MCP、ngrok 和内置 clangd）：见 [`desktop/README.md`](desktop/README.md)。原 VS Code 扩展保留在 `src/`；独立版兼容范围与局限见桌面版说明。
 > bilibili视频教程 https://www.bilibili.com/video/BV1FMeW6RE1J
 > 
 > 用户 QQ 交流群：611067889

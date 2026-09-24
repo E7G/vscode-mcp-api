@@ -1,4 +1,8 @@
 node_modules/
+desktop/build*/
+desktop/dist/
+desktop/.cache/
+work/
 out/
 *.vsix
 *.js.map
