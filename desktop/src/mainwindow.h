@@ -58,6 +58,8 @@ private:
     QAction *trayServerAction_ = nullptr;
     QAction *trayTunnelAction_ = nullptr;
     QLineEdit *workspaceEdit_ = nullptr;
+    QLineEdit *sshHostEdit_ = nullptr;
+    QLineEdit *remoteRootEdit_ = nullptr;
     QLineEdit *authTokenEdit_ = nullptr;
     QLineEdit *ngrokTokenEdit_ = nullptr;
     QLineEdit *ngrokDomainEdit_ = nullptr;

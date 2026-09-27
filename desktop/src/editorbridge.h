@@ -18,6 +18,7 @@ public:
     QString textForPath(const QString &path) const;
     void refreshFile(const QString &path);
     void setWorkspace(const QString &path);
+    void setRemoteTarget(const QString &sshHost, const QString &remoteRoot);
 
 private:
     QPlainTextEdit *activeEditor() const;
@@ -25,6 +26,11 @@ private:
     QPlainTextEdit *openFile(const QString &path, int line = -1, int character = 0);
     void saveEditor(QPlainTextEdit *editor);
     int tabIndex(const QString &path) const;
+    QByteArray readRemote(const QString &path) const;
+    void writeRemote(const QString &path, const QByteArray &bytes) const;
+    QString relativePath(const QString &path) const;
     QTabWidget *tabs_ = nullptr;
     QString workspace_;
+    QString sshHost_;
+    QString remoteRoot_;
 };

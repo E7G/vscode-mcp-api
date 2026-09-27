@@ -61,10 +61,12 @@ MainWindow::MainWindow(const QString &workspaceOverride, QWidget *parent) : QMai
     loadSettings();
     buildUi();
     editorBridge_->setWorkspace(workspaceEdit_->text());
+    editorBridge_->setRemoteTarget(sshHostEdit_->text(), remoteRootEdit_->text());
     buildTray();
 
     server_ = new McpServer();
     server_->setWorkspace(workspaceEdit_->text());
+    server_->setRemoteTarget(sshHostEdit_->text(), remoteRootEdit_->text());
     server_->setAuthToken(authTokenEdit_->text());
     server_->setEditorBridge(editorBridge_);
     server_->moveToThread(&serverThread_);
@@ -92,6 +94,8 @@ MainWindow::MainWindow(const QString &workspaceOverride, QWidget *parent) : QMai
     });
 
     connect(workspaceEdit_, &QLineEdit::editingFinished, this, &MainWindow::saveSettings);
+    connect(sshHostEdit_, &QLineEdit::editingFinished, this, &MainWindow::saveSettings);
+    connect(remoteRootEdit_, &QLineEdit::editingFinished, this, &MainWindow::saveSettings);
     connect(authTokenEdit_, &QLineEdit::editingFinished, this, &MainWindow::saveSettings);
     connect(portSpin_, &QSpinBox::valueChanged, this, &MainWindow::saveSettings);
     connect(ngrokDomainEdit_, &QLineEdit::editingFinished, this, &MainWindow::saveSettings);
@@ -130,6 +134,14 @@ void MainWindow::buildUi()
     auto *workspaceRow=new QHBoxLayout(); workspaceEdit_=new QLineEdit(workspaceOverride_.isEmpty() ? saved.value("workspace",QDir::homePath()).toString() : workspaceOverride_); workspaceEdit_->setPlaceholderText("选择 AI 工具可访问的项目目录");
     auto *browse=new QPushButton(QStringLiteral("浏览…")); connect(browse,&QPushButton::clicked,this,&MainWindow::chooseWorkspace);
     workspaceRow->addWidget(workspaceEdit_,1); workspaceRow->addWidget(browse); workspaceLayout->addLayout(workspaceRow);
+    auto *sshForm=new QFormLayout();
+    sshHostEdit_=new QLineEdit(saved.value("sshHost").toString());
+    sshHostEdit_->setPlaceholderText(QStringLiteral("SSH config alias，例如 cxpa；留空使用本机工作区"));
+    remoteRootEdit_=new QLineEdit(saved.value("remoteRoot").toString());
+    remoteRootEdit_->setPlaceholderText(QStringLiteral("服务器项目绝对路径，例如 /srv/project"));
+    sshForm->addRow(QStringLiteral("远程 SSH 主机"),sshHostEdit_);
+    sshForm->addRow(QStringLiteral("远程项目目录"),remoteRootEdit_);
+    workspaceLayout->addLayout(sshForm);
     layout->addWidget(workspaceCard);
 
     auto *serverCard=card(root); auto *serverLayout=new QVBoxLayout(serverCard);
@@ -189,9 +201,14 @@ void MainWindow::loadSettings()
 
 void MainWindow::saveSettings()
 {
-    if (editorBridge_) editorBridge_->setWorkspace(workspaceEdit_->text());
+    if (editorBridge_) {
+        editorBridge_->setWorkspace(workspaceEdit_->text());
+        editorBridge_->setRemoteTarget(sshHostEdit_->text().trimmed(), remoteRootEdit_->text().trimmed());
+    }
     const bool restartForPortChange = serverRunning_ && portSpin_->value() != actualPort_;
     QSettings s; s.setValue("workspace",workspaceEdit_->text()); s.setValue("port",portSpin_->value());
+    s.setValue("sshHost",sshHostEdit_->text().trimmed());
+    s.setValue("remoteRoot",remoteRootEdit_->text().trimmed());
     s.setValue("ngrokDomain",ngrokDomainEdit_->text()); s.setValue("ngrokExecutable",ngrokPathEdit_->text());
     if(themeCombo_) s.setValue("theme",themeCombo_->currentData().toString());
     s.sync();
@@ -199,6 +216,8 @@ void MainWindow::saveSettings()
     else { QString credentialError; if (!Credentials::writeMcpToken(authTokenEdit_->text().trimmed(),&credentialError)) appendLog(credentialError); }
     if (server_) {
         QMetaObject::invokeMethod(server_,"setWorkspace",Qt::QueuedConnection,Q_ARG(QString,workspaceEdit_->text()));
+        QMetaObject::invokeMethod(server_,"setRemoteTarget",Qt::QueuedConnection,
+            Q_ARG(QString,sshHostEdit_->text().trimmed()),Q_ARG(QString,remoteRootEdit_->text().trimmed()));
         QMetaObject::invokeMethod(server_,"setAuthToken",Qt::QueuedConnection,Q_ARG(QString,authTokenEdit_->text()));
     }
     if (ngrok_) ngrok_->setExecutable(ngrokPathEdit_->text());

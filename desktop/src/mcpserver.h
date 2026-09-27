@@ -27,6 +27,7 @@ public slots:
     void start(int port);
     void stop();
     void setWorkspace(const QString &path);
+    void setRemoteTarget(const QString &sshHost, const QString &remoteRoot);
     void setAuthToken(const QString &token);
     void setEditorBridge(EditorBridge *editor);
 
@@ -50,10 +51,15 @@ private:
     QJsonObject callLanguage(const QString &name, const QJsonObject &args);
     QJsonObject schema(const QJsonObject &properties, const QStringList &required = {}) const;
     QString checkedPath(const QString &path, bool mustExist = false) const;
+    QString checkedRemotePath(const QString &path) const;
+    QJsonObject runRemote(const QString &command, const QByteArray &stdinData = {}, int timeoutMs = 30000) const;
+    static QString shellQuote(const QString &value);
     QJsonObject result(const QJsonValue &value, bool isError = false) const;
 
     QTcpServer *tcpServer_ = nullptr;
     QString workspace_;
+    QString sshHost_;
+    QString remoteRoot_;
     QString authToken_;
     EditorBridge *editor_ = nullptr;
     QHash<QString, LanguageService *> languages_;

@@ -19,6 +19,8 @@
 #include <QElapsedTimer>
 #include <QDateTime>
 #include <QUrl>
+#include <QStandardPaths>
+#include <QRegularExpression>
 #include <exception>
 
 namespace {
@@ -85,6 +87,11 @@ void McpServer::setWorkspace(const QString &path)
     qDeleteAll(languages_);
     languages_.clear();
     workspace_ = next;
+}
+void McpServer::setRemoteTarget(const QString &sshHost, const QString &remoteRoot)
+{
+    sshHost_ = sshHost.trimmed();
+    remoteRoot_ = remoteRoot.trimmed();
 }
 void McpServer::setAuthToken(const QString &token) { authToken_ = token; }
 void McpServer::setEditorBridge(EditorBridge *editor) { editor_ = editor; }
@@ -350,11 +357,85 @@ QString McpServer::checkedPath(const QString &path, bool mustExist) const
     return clean;
 }
 
+QString McpServer::shellQuote(const QString &value)
+{
+    QString quoted = value;
+    quoted.replace(QLatin1Char('\''), QStringLiteral("'\\''"));
+    return QLatin1Char('\'') + quoted + QLatin1Char('\'');
+}
+
+QString McpServer::checkedRemotePath(const QString &path) const
+{
+    if (sshHost_.isEmpty() || remoteRoot_.isEmpty()) throw QStringLiteral("请填写 SSH 主机别名与远程项目目录");
+    static const QRegularExpression hostPattern(QStringLiteral("^[A-Za-z0-9_.@-]+$"));
+    if (!hostPattern.match(sshHost_).hasMatch()) throw QStringLiteral("SSH 主机只能是 ssh config 中的 alias/hostname，不接受命令参数");
+    auto normalize = [](const QString &raw, bool allowParent) {
+        QStringList parts;
+        for (const QString &part : QDir::fromNativeSeparators(raw).split(QLatin1Char('/'), Qt::SkipEmptyParts)) {
+            if (part == QStringLiteral(".")) continue;
+            if (part == QStringLiteral("..")) {
+                if (!allowParent || parts.isEmpty()) throw QStringLiteral("远程路径越出项目目录");
+                parts.removeLast();
+            } else parts.append(part);
+        }
+        return QLatin1Char('/') + parts.join(QLatin1Char('/'));
+    };
+    const QString root = normalize(remoteRoot_, false);
+    const QString supplied = path.trimmed();
+    const QString candidate = normalize(supplied.startsWith(QLatin1Char('/')) ? supplied : root + QLatin1Char('/') + supplied, true);
+    if (candidate != root && root != QStringLiteral("/") && !candidate.startsWith(root + QLatin1Char('/')))
+        throw QStringLiteral("远程路径必须位于配置的项目目录内");
+    return candidate;
+}
+
+QJsonObject McpServer::runRemote(const QString &command, const QByteArray &stdinData, int timeoutMs) const
+{
+    if (sshHost_.isEmpty()) throw QStringLiteral("未启用 SSH 远程工作区");
+    const QString ssh = QStandardPaths::findExecutable(QStringLiteral("ssh"));
+    if (ssh.isEmpty()) throw QStringLiteral("系统未找到 OpenSSH ssh.exe，请启用 Windows OpenSSH Client");
+    QProcess process;
+    process.setProcessChannelMode(QProcess::SeparateChannels);
+    process.start(ssh, {QStringLiteral("-T"), QStringLiteral("-oBatchMode=yes"),
+        QStringLiteral("-oConnectTimeout=10"), sshHost_, command});
+    if (!process.waitForStarted(10000)) throw QStringLiteral("无法启动 ssh：") + process.errorString();
+    if (!stdinData.isEmpty() && process.write(stdinData) != stdinData.size()) {
+        process.kill(); process.waitForFinished(1000);
+        throw QStringLiteral("SSH 数据发送失败：") + process.errorString();
+    }
+    process.closeWriteChannel();
+    QByteArray out, err;
+    QElapsedTimer elapsed; elapsed.start();
+    while (process.state() != QProcess::NotRunning && elapsed.elapsed() < timeoutMs) {
+        process.waitForReadyRead(100);
+        out += process.readAllStandardOutput();
+        err += process.readAllStandardError();
+        if (out.size() > 4 * 1024 * 1024 || err.size() > 1024 * 1024) {
+            process.kill(); process.waitForFinished(1000);
+            throw QStringLiteral("SSH 返回数据超过限制");
+        }
+    }
+    out += process.readAllStandardOutput();
+    err += process.readAllStandardError();
+    if (process.state() != QProcess::NotRunning) {
+        process.kill(); process.waitForFinished(1000);
+        throw QStringLiteral("SSH 操作超时（%1 ms）").arg(timeoutMs);
+    }
+    return {{QStringLiteral("stdout"), QString::fromUtf8(out)},
+            {QStringLiteral("stderr"), QString::fromUtf8(err)},
+            {QStringLiteral("exitCode"), process.exitCode()}};
+}
+
 QJsonObject McpServer::callTool(const QString &name, const QJsonObject &args, bool *isError)
 {
     try {
         *isError = false;
         const QString filePath = textValue(args.value(QStringLiteral("filePath")));
+        const bool remote = !sshHost_.isEmpty();
+        if (remote && (name == QStringLiteral("get_diagnostics") ||
+            name == QStringLiteral("find_references") || name == QStringLiteral("go_to_definition") ||
+            name == QStringLiteral("get_hover") || name == QStringLiteral("get_document_symbols") ||
+            name == QStringLiteral("get_code_actions") || name == QStringLiteral("apply_code_action") || name == QStringLiteral("rename_symbol")))
+            throw QStringLiteral("远程 LSP 尚未配置；请在服务器安装对应语言服务器，后续版本支持通过 SSH 启动");
         if (name == QStringLiteral("get_active_file") || name == QStringLiteral("get_selection") ||
             name == QStringLiteral("get_open_tabs")) return callEditor(name, args);
         if (name == QStringLiteral("get_diagnostics") && filePath.isEmpty() && editor_) {
@@ -384,7 +465,7 @@ QJsonObject McpServer::callTool(const QString &name, const QJsonObject &args, bo
         if (name == QStringLiteral("open_file") || name == QStringLiteral("show_diff") ||
             name == QStringLiteral("close_file")) {
             QJsonObject editorArgs = args;
-            editorArgs.insert(QStringLiteral("filePath"), checkedPath(filePath, name != QStringLiteral("close_file")));
+            editorArgs.insert(QStringLiteral("filePath"), remote ? checkedRemotePath(filePath) : checkedPath(filePath, name != QStringLiteral("close_file")));
             return callEditor(name, editorArgs);
         }
         if (name == QStringLiteral("execute_vscode_command")) {
@@ -393,7 +474,7 @@ QJsonObject McpServer::callTool(const QString &name, const QJsonObject &args, bo
             if (command == QStringLiteral("workbench.action.files.save"))
                 return callEditor(QStringLiteral("save_active_file"), {});
             if (command == QStringLiteral("workbench.action.files.openFile") && !values.isEmpty())
-                return callEditor(QStringLiteral("open_file"), {{"filePath", checkedPath(values.first().toString(), true)}});
+                return callEditor(QStringLiteral("open_file"), {{"filePath", remote ? checkedRemotePath(values.first().toString()) : checkedPath(values.first().toString(), true)}});
             if (command == QStringLiteral("workbench.action.closeActiveEditor")) {
                 QJsonValue active;
                 QString editorError;
@@ -404,6 +485,21 @@ QJsonObject McpServer::callTool(const QString &name, const QJsonObject &args, bo
             throw QStringLiteral("本机编辑器不支持此命令：") + command;
         }
         if (name == QStringLiteral("get_workspace_info")) {
+            if (remote) {
+                const QString root = checkedRemotePath(QString{});
+                const QJsonObject response = runRemote(QStringLiteral("ls -1A -- %1").arg(shellQuote(root)));
+                if (response.value("exitCode").toInt() != 0) throw QStringLiteral("远程目录读取失败：") + response.value("stderr").toString();
+                QJsonArray entries;
+                for (const QString &entry : response.value("stdout").toString().split('\n', Qt::SkipEmptyParts)) {
+                    if (entries.size() >= 100) break;
+                    entries.append(entry);
+                }
+                const QString nameValue = QFileInfo(root).fileName();
+                return result(QJsonObject{{"workspace",root},{"rootPath",root},{"name",nameValue},
+                    {"folders",QJsonArray{QJsonObject{{"name",nameValue},{"path",root}}}},
+                    {"entries",entries},{"truncated",response.value("stdout").toString().split('\n', Qt::SkipEmptyParts).size()>100},
+                    {"remote",true},{"sshHost",sshHost_}});
+            }
             QDir root(workspace_); if (workspace_.isEmpty()) throw QStringLiteral("请先在应用中选择工作区");
             const QFileInfoList entries = root.entryInfoList(QDir::AllEntries | QDir::NoDotAndDotDot, QDir::DirsFirst | QDir::Name);
             QJsonArray names; int shown = 0;
@@ -413,6 +509,18 @@ QJsonObject McpServer::callTool(const QString &name, const QJsonObject &args, bo
                 {"entries",names},{"truncated",entries.size()>100}});
         }
         if (name == QStringLiteral("read_file")) {
+            if (remote) {
+                const QString path = checkedRemotePath(filePath);
+                const QJsonObject response = runRemote(QStringLiteral("cat -- %1").arg(shellQuote(path)));
+                if (response.value("exitCode").toInt() != 0) throw QStringLiteral("远程文件读取失败：") + response.value("stderr").toString();
+                QString content = response.value("stdout").toString();
+                const QStringList lines = content.split('\n');
+                const int start = qMax(0, args.value("startLine").toInt(0));
+                const int end = args.value("endLine").isUndefined() ? lines.size()-1 : qMin(lines.size()-1,args.value("endLine").toInt());
+                if (!args.value("startLine").isUndefined() || !args.value("endLine").isUndefined()) content = start <= end ? lines.mid(start,end-start+1).join('\n') : QString{};
+                return result(QJsonObject{{"content",content},{"lineCount",lines.size()},
+                    {"language",QFileInfo(path).suffix()},{"path",path},{"remote",true}});
+            }
             const QString path = checkedPath(filePath, true);
             QString content;
             if (editor_) QMetaObject::invokeMethod(editor_, [&]() { content = editor_->textForPath(path); }, Qt::BlockingQueuedConnection);
@@ -428,6 +536,25 @@ QJsonObject McpServer::callTool(const QString &name, const QJsonObject &args, bo
             return result(QJsonObject{{"content",content},{"lineCount",lines.size()},{"language",QFileInfo(path).suffix()}});
         }
         if (name == QStringLiteral("write_file") || name == QStringLiteral("create_file")) {
+            if (remote) {
+                const QString path = checkedRemotePath(filePath);
+                const qsizetype parentEnd = path.lastIndexOf(QLatin1Char('/'));
+                const QString parent = parentEnd <= 0 ? QStringLiteral("/") : path.left(parentEnd);
+                const QJsonObject status = runRemote(QStringLiteral("test -e %1").arg(shellQuote(path)));
+                const bool exists = status.value("exitCode").toInt() == 0;
+                if (name == QStringLiteral("create_file")) {
+                    if (exists) throw QStringLiteral("远程文件已存在：") + path;
+                } else if (!exists && !args.value("createIfMissing").toBool(true)) {
+                    throw QStringLiteral("远程文件不存在，且 createIfMissing=false");
+                }
+                const QString command = QStringLiteral("mkdir -p -- %1 && (%2cat > %3)")
+                    .arg(shellQuote(parent), name == QStringLiteral("create_file") ? QStringLiteral("set -C; ") : QString{}, shellQuote(path));
+                const QByteArray bytes = textValue(args.value("content")).toUtf8();
+                const QJsonObject saved = runRemote(command, bytes);
+                if (saved.value("exitCode").toInt() != 0) throw QStringLiteral("远程文件写入失败：") + saved.value("stderr").toString();
+                return result(QJsonObject{{"path",path},{"bytesWritten",bytes.size()},
+                    {"created",!exists},{"remote",true}});
+            }
             const QString path = checkedPath(filePath); const bool exists = QFileInfo::exists(path);
             if (name == QStringLiteral("create_file") && exists) throw QStringLiteral("文件已存在：") + path;
             if (name == QStringLiteral("write_file") && exists == false && !args.value("createIfMissing").toBool(true)) throw QStringLiteral("文件不存在，且 createIfMissing=false");
@@ -439,6 +566,15 @@ QJsonObject McpServer::callTool(const QString &name, const QJsonObject &args, bo
             return result(QJsonObject{{"path",path},{"bytesWritten",content.size()},{"created",!exists}});
         }
         if (name == QStringLiteral("delete_file")) {
+            if (remote) {
+                const QString path = checkedRemotePath(filePath);
+                const QString command = args.value("useTrash").toBool(false)
+                    ? QStringLiteral("gio trash -- %1").arg(shellQuote(path))
+                    : QStringLiteral("rm -f -- %1").arg(shellQuote(path));
+                const QJsonObject removed = runRemote(command);
+                if (removed.value("exitCode").toInt() != 0) throw QStringLiteral("远程文件删除失败：") + removed.value("stderr").toString();
+                return result(QJsonObject{{"deleted",true},{"path",path},{"remote",true}});
+            }
             const QString path = checkedPath(filePath,true);
             const bool useTrash = args.value("useTrash").toBool(false);
             if (!QFileInfo(path).isFile() || !(useTrash ? QFile::moveToTrash(path) : QFile::remove(path)))
@@ -446,8 +582,34 @@ QJsonObject McpServer::callTool(const QString &name, const QJsonObject &args, bo
             return result(QJsonObject{{"deleted",true},{"path",path}});
         }
         if (name == QStringLiteral("spawn_terminal")) {
-            if (workspace_.isEmpty()) throw QStringLiteral("请先在应用中选择工作区");
+            if (workspace_.isEmpty() && !remote) throw QStringLiteral("请先在应用中选择工作区");
             if (terminals_.size() >= 32) throw QStringLiteral("最多可管理 32 个终端");
+            if (remote) {
+                const QString cwd = checkedRemotePath(textValue(args.value("cwd")));
+                const QString command = QStringLiteral("cd %1 && exec \"${SHELL:-/bin/bash}\"").arg(shellQuote(cwd));
+                const QString ssh = QStandardPaths::findExecutable(QStringLiteral("ssh"));
+                if (ssh.isEmpty()) throw QStringLiteral("系统未找到 OpenSSH ssh.exe");
+                const QString id = QUuid::createUuid().toString(QUuid::WithoutBraces);
+                auto *proc = new QProcess(this);
+                proc->setProcessChannelMode(QProcess::MergedChannels);
+                proc->setProperty("terminalName", textValue(args.value("name")));
+                proc->setProperty("terminalOutput", QByteArray{});
+                proc->setProperty("remote", true);
+                proc->setProperty("cwd", cwd);
+                connect(proc, &QProcess::readyRead, proc, [proc]() {
+                    QByteArray output = proc->property("terminalOutput").toByteArray();
+                    output += proc->readAll(); constexpr qsizetype cap = 512 * 1024;
+                    if (output.size() > cap) output = output.right(cap);
+                    proc->setProperty("terminalOutput", output);
+                });
+                terminals_.insert(id, proc);
+                proc->start(ssh, {QStringLiteral("-tt"), QStringLiteral("-oConnectTimeout=10"), sshHost_, command});
+                if (!proc->waitForStarted(10000)) { terminals_.remove(id); proc->deleteLater(); throw QStringLiteral("远程终端 SSH 启动失败：") + proc->errorString(); }
+                const QString initial = textValue(args.value("command"));
+                if (!initial.isEmpty()) proc->write(initial.toUtf8() + "\n");
+                return result(QJsonObject{{"id",id},{"terminalId",id},{"name",proc->property("terminalName").toString()},
+                    {"cwd",cwd},{"pid",static_cast<qint64>(proc->processId())},{"remote",true},{"sshHost",sshHost_}});
+            }
             QString cwd=textValue(args.value("cwd")); if(cwd.isEmpty()) cwd=workspace_;
             const QFileInfo cwdInfo(cwd); if(!cwdInfo.exists() || !cwdInfo.isDir()) throw QStringLiteral("终端工作目录不存在：")+cwd;
             const QString id=QUuid::createUuid().toString(QUuid::WithoutBraces);
@@ -477,7 +639,8 @@ QJsonObject McpServer::callTool(const QString &name, const QJsonObject &args, bo
             for(auto it=terminals_.cbegin();it!=terminals_.cend();++it) {
                 QProcess *proc=it.value();
                 list.append(QJsonObject{{"id",it.key()},{"terminalId",it.key()},{"name",proc->property("terminalName").toString()},
-                    {"cwd",proc->workingDirectory()},{"alive",proc->state()!=QProcess::NotRunning},
+                    {"cwd",proc->property("remote").toBool() ? proc->property("cwd").toString() : proc->workingDirectory()},
+                    {"remote",proc->property("remote").toBool()},{"alive",proc->state()!=QProcess::NotRunning},
                     {"running",proc->state()!=QProcess::NotRunning},{"createdAt",QDateTime::currentMSecsSinceEpoch()},
                     {"logSize",proc->property("terminalOutput").toByteArray().size()},
                     {"pid",static_cast<qint64>(proc->processId())},{"exitCode",proc->exitCode()}});
@@ -508,6 +671,22 @@ QJsonObject McpServer::callTool(const QString &name, const QJsonObject &args, bo
         }
         if (name == QStringLiteral("search_workspace_symbols")) {
             const QString query = textValue(args.value("query")); if (query.isEmpty()) throw QStringLiteral("query 不能为空");
+            if (remote) {
+                const QString root = checkedRemotePath(QString{});
+                const QString command = QStringLiteral("grep -RInI --exclude-dir=.git --exclude-dir=node_modules --exclude-dir=build -- %1 %2 2>/dev/null | head -200")
+                    .arg(shellQuote(query), shellQuote(root));
+                const QJsonObject response = runRemote(command, {}, 60000);
+                QJsonArray matches;
+                for (const QString &line : response.value("stdout").toString().split('\n', Qt::SkipEmptyParts)) {
+                    const qsizetype first = line.indexOf(':');
+                    const qsizetype second = first < 0 ? -1 : line.indexOf(':', first + 1);
+                    if (first < 0 || second < 0) continue;
+                    bool ok = false; const int lineNumber = line.mid(first + 1, second - first - 1).toInt(&ok);
+                    matches.append(QJsonObject{{"name",line.mid(second + 1).trimmed().left(100)}, {"kind","TextMatch"},
+                        {"filePath",line.left(first)},{"startLine",ok ? qMax(0,lineNumber-1) : 0}, {"containerName",QJsonValue::Null}});
+                }
+                return result(matches);
+            }
             QJsonArray symbols;
             for (auto *service : languages_) {
                 try {
@@ -536,6 +715,13 @@ QJsonObject McpServer::callTool(const QString &name, const QJsonObject &args, bo
             else command = textValue(args.value("command"));
             if (command.isEmpty()) throw QStringLiteral("command 不能为空");
             const int timeout=qBound(1000,args.value("timeoutMs").toInt(30000),120000);
+            if (remote) {
+                const QString cwd = checkedRemotePath(textValue(args.value("cwd")));
+                const QJsonObject response = runRemote(QStringLiteral("cd %1 && bash -lc %2")
+                    .arg(shellQuote(cwd), shellQuote(command)), {}, timeout);
+                return result(QJsonObject{{"stdout",response.value("stdout")},{"stderr",response.value("stderr")},
+                    {"exitCode",response.value("exitCode")},{"truncated",false},{"remote",true},{"sshHost",sshHost_}});
+            }
             QString workingDirectory=textValue(args.value("cwd")); if(workingDirectory.isEmpty()) workingDirectory=workspace_;
             if(!workingDirectory.isEmpty() && (!QFileInfo(workingDirectory).exists() || !QFileInfo(workingDirectory).isDir())) throw QStringLiteral("工作目录不存在：")+workingDirectory;
 #ifdef Q_OS_WIN

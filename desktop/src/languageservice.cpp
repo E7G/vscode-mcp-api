@@ -125,7 +125,7 @@ void LanguageService::start()
     request(QStringLiteral("initialize"), {{"processId", static_cast<qint64>(QCoreApplication::applicationPid())},
         {"rootUri", rootUri}, {"rootPath", workspace_},
         {"workspaceFolders", QJsonArray{QJsonObject{{"uri", rootUri}, {"name", QFileInfo(workspace_).fileName()}}}},
-        {"capabilities", capabilities}, {"clientInfo", QJsonObject{{"name", "qt-mcp-standalone"}, {"version", "3.0.0"}}}}, 15000);
+        {"capabilities", capabilities}, {"clientInfo", QJsonObject{{"name", "qt-mcp-standalone"}, {"version", APP_VERSION}}}}, 15000);
     initialized_ = true;
     notify(QStringLiteral("initialized"), {});
 }

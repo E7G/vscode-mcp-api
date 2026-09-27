@@ -18,6 +18,8 @@
 #include <QTextCursor>
 #include <QTextDocument>
 #include <QVBoxLayout>
+#include <QProcess>
+#include <QStandardPaths>
 
 namespace {
 QString languageFor(const QString &path)
@@ -54,6 +56,10 @@ EditorBridge::EditorBridge(QWidget *parent) : QWidget(parent)
     tabs_->setMinimumHeight(240);
     layout->addLayout(bar); layout->addWidget(tabs_);
     connect(openButton, &QPushButton::clicked, this, [this]() {
+        if (!sshHost_.isEmpty()) {
+            QMessageBox::information(this, QStringLiteral("SSH 远程工作区"), QStringLiteral("SSH 工作区文件请通过 MCP 的 open_file 打开；本机文件选择器仅用于本机工作区。"));
+            return;
+        }
         const QString path = QFileDialog::getOpenFileName(this, QStringLiteral("打开代码文件"));
         if (!path.isEmpty()) {
             try { openFile(path); }
@@ -75,12 +81,59 @@ EditorBridge::EditorBridge(QWidget *parent) : QWidget(parent)
 }
 
 void EditorBridge::setWorkspace(const QString &path) { workspace_ = QDir(path).absolutePath(); }
+void EditorBridge::setRemoteTarget(const QString &host, const QString &root)
+{
+    sshHost_ = host.trimmed();
+    remoteRoot_ = QDir::fromNativeSeparators(root.trimmed());
+    while (remoteRoot_.size() > 1 && remoteRoot_.endsWith(QLatin1Char('/'))) remoteRoot_.chop(1);
+}
+
+QString EditorBridge::relativePath(const QString &path) const
+{
+    if (sshHost_.isEmpty()) return workspace_.isEmpty() ? QFileInfo(path).fileName() : QDir(workspace_).relativeFilePath(path);
+    if (path == remoteRoot_) return QStringLiteral(".");
+    return path.startsWith(remoteRoot_ + QLatin1Char('/')) ? path.mid(remoteRoot_.size() + 1) : QFileInfo(path).fileName();
+}
+
+QByteArray EditorBridge::readRemote(const QString &path) const
+{
+    const QString ssh = QStandardPaths::findExecutable(QStringLiteral("ssh"));
+    if (ssh.isEmpty()) throw QStringLiteral("系统未找到 OpenSSH ssh.exe");
+    QString quoted = path; quoted.replace(QLatin1Char('\''), QStringLiteral("'\\''"));
+    QProcess process; process.setProcessChannelMode(QProcess::SeparateChannels);
+    process.start(ssh, {QStringLiteral("-T"),QStringLiteral("-oBatchMode=yes"),QStringLiteral("-oConnectTimeout=10"),
+        sshHost_,QStringLiteral("cat -- '%1'").arg(quoted)});
+    if (!process.waitForStarted(10000)) throw QStringLiteral("SSH 启动失败：") + process.errorString();
+    process.closeWriteChannel();
+    if (!process.waitForFinished(30000)) { process.kill(); process.waitForFinished(1000); throw QStringLiteral("远程文件读取超时"); }
+    if (process.exitCode() != 0) throw QStringLiteral("远程文件读取失败：") + QString::fromUtf8(process.readAllStandardError());
+    return process.readAllStandardOutput();
+}
+
+void EditorBridge::writeRemote(const QString &path, const QByteArray &bytes) const
+{
+    const QString ssh = QStandardPaths::findExecutable(QStringLiteral("ssh"));
+    if (ssh.isEmpty()) throw QStringLiteral("系统未找到 OpenSSH ssh.exe");
+    QString quotedPath = path, quotedParent = path.left(path.lastIndexOf(QLatin1Char('/')));
+    quotedPath.replace(QLatin1Char('\''), QStringLiteral("'\\''"));
+    quotedParent.replace(QLatin1Char('\''), QStringLiteral("'\\''"));
+    QProcess process; process.setProcessChannelMode(QProcess::SeparateChannels);
+    const QString command = QStringLiteral("mkdir -p -- '%1' && cat > '%2'").arg(quotedParent,quotedPath);
+    process.start(ssh, {QStringLiteral("-T"),QStringLiteral("-oBatchMode=yes"),QStringLiteral("-oConnectTimeout=10"),sshHost_,command});
+    if (!process.waitForStarted(10000)) throw QStringLiteral("SSH 启动失败：") + process.errorString();
+    if (process.write(bytes) != bytes.size()) { process.kill(); process.waitForFinished(1000); throw QStringLiteral("远程文件发送失败"); }
+    process.closeWriteChannel();
+    if (!process.waitForFinished(30000)) { process.kill(); process.waitForFinished(1000); throw QStringLiteral("远程文件写入超时"); }
+    if (process.exitCode() != 0) throw QStringLiteral("远程文件写入失败：") + QString::fromUtf8(process.readAllStandardError());
+}
 
 int EditorBridge::tabIndex(const QString &path) const
 {
-    const QString canonical = QFileInfo(path).absoluteFilePath();
-    for (int i = 0; i < tabs_->count(); ++i)
-        if (tabs_->widget(i)->property("filePath").toString().compare(canonical, Qt::CaseInsensitive) == 0) return i;
+    const QString canonical = sshHost_.isEmpty() ? QFileInfo(path).absoluteFilePath() : QDir::fromNativeSeparators(path);
+    const Qt::CaseSensitivity sensitivity = sshHost_.isEmpty() ? Qt::CaseInsensitive : Qt::CaseSensitive;
+    for (int i = 0; i < tabs_->count(); ++i) {
+        if (tabs_->widget(i)->property("filePath").toString().compare(canonical, sensitivity) == 0) return i;
+    }
     return -1;
 }
 
@@ -109,16 +162,20 @@ QString EditorBridge::textForPath(const QString &path) const
 
 QPlainTextEdit *EditorBridge::openFile(const QString &path, int line, int character)
 {
-    const QString absolute = QFileInfo(path).absoluteFilePath();
+    const QString absolute = sshHost_.isEmpty() ? QFileInfo(path).absoluteFilePath() : path;
     QPlainTextEdit *editor = editorForPath(absolute);
     if (!editor) {
-        QFile file(absolute);
-        if (!file.open(QIODevice::ReadOnly)) throw QStringLiteral("无法读取文件：") + file.errorString();
+        QByteArray fileBytes;
+        if (sshHost_.isEmpty()) {
+            QFile file(absolute);
+            if (!file.open(QIODevice::ReadOnly)) throw QStringLiteral("无法读取文件：") + file.errorString();
+            fileBytes = file.readAll();
+        } else fileBytes = readRemote(absolute);
         editor = new QPlainTextEdit(tabs_);
         editor->setProperty("filePath", absolute);
         editor->setLineWrapMode(QPlainTextEdit::NoWrap);
         editor->setTabStopDistance(editor->fontMetrics().horizontalAdvance(' ') * 4);
-        editor->setPlainText(QString::fromUtf8(file.readAll()));
+        editor->setPlainText(QString::fromUtf8(fileBytes));
         editor->document()->setModified(false);
         const int index = tabs_->addTab(editor, QFileInfo(absolute).fileName());
         tabs_->setTabToolTip(index, absolute);
@@ -144,6 +201,11 @@ QPlainTextEdit *EditorBridge::openFile(const QString &path, int line, int charac
 void EditorBridge::saveEditor(QPlainTextEdit *editor)
 {
     const QString path = editor->property("filePath").toString();
+    if (!sshHost_.isEmpty()) {
+        writeRemote(path, editor->toPlainText().toUtf8());
+        editor->document()->setModified(false);
+        return;
+    }
     QSaveFile file(path);
     if (!file.open(QIODevice::WriteOnly)) throw QStringLiteral("无法保存文件：") + file.errorString();
     const QByteArray bytes = editor->toPlainText().toUtf8();
@@ -155,10 +217,16 @@ void EditorBridge::refreshFile(const QString &path)
 {
     auto *editor = editorForPath(path);
     if (!editor || editor->document()->isModified()) return;
-    QFile file(path);
-    if (!file.open(QIODevice::ReadOnly)) return;
+    QByteArray bytes;
+    if (sshHost_.isEmpty()) {
+        QFile file(path);
+        if (!file.open(QIODevice::ReadOnly)) return;
+        bytes = file.readAll();
+    } else {
+        try { bytes = readRemote(path); } catch (...) { return; }
+    }
     const QSignalBlocker blocker(editor->document());
-    editor->setPlainText(QString::fromUtf8(file.readAll()));
+    editor->setPlainText(QString::fromUtf8(bytes));
     editor->document()->setModified(false);
 }
 
@@ -169,7 +237,7 @@ QJsonValue EditorBridge::invokeTool(const QString &name, const QJsonObject &args
         auto *editor = activeEditor();
         if (!editor) return QJsonValue::Null;
         const QString current = activePath();
-        return QJsonObject{{"path", current}, {"relativePath", workspace_.isEmpty() ? QFileInfo(current).fileName() : QDir(workspace_).relativeFilePath(current)},
+        return QJsonObject{{"path", current}, {"relativePath", relativePath(current)},
             {"content", editor->toPlainText()}, {"language", languageFor(current)},
             {"isDirty", editor->document()->isModified()}, {"lineCount", editor->document()->blockCount()}};
     }
@@ -190,7 +258,7 @@ QJsonValue EditorBridge::invokeTool(const QString &name, const QJsonObject &args
             auto *editor = qobject_cast<QPlainTextEdit *>(tabs_->widget(i));
             if (!editor) continue;
             const QString current = editor->property("filePath").toString();
-            items.append(QJsonObject{{"path", current}, {"relativePath", workspace_.isEmpty() ? QFileInfo(current).fileName() : QDir(workspace_).relativeFilePath(current)},
+            items.append(QJsonObject{{"path", current}, {"relativePath", relativePath(current)},
                 {"language", languageFor(current)}, {"isDirty", editor->document()->isModified()},
                 {"isActive", i == tabs_->currentIndex()}, {"type", "file"}});
         }
@@ -198,7 +266,7 @@ QJsonValue EditorBridge::invokeTool(const QString &name, const QJsonObject &args
     }
     if (name == QStringLiteral("open_file")) {
         openFile(path, args.value("line").toInt(-1), args.value("character").toInt());
-        return QJsonObject{{"opened", true}, {"filePath", QFileInfo(path).absoluteFilePath()}};
+        return QJsonObject{{"opened", true}, {"filePath", sshHost_.isEmpty() ? QFileInfo(path).absoluteFilePath() : path}};
     }
     if (name == QStringLiteral("close_file")) {
         const int index = tabIndex(path);
@@ -210,14 +278,18 @@ QJsonValue EditorBridge::invokeTool(const QString &name, const QJsonObject &args
         return QJsonObject{{"closed", 1}, {"filePath", path}};
     }
     if (name == QStringLiteral("show_diff")) {
-        QFile file(path);
-        if (!file.open(QIODevice::ReadOnly)) throw QStringLiteral("无法读取差异原文件：") + file.errorString();
+        QByteArray oldBytes;
+        if (sshHost_.isEmpty()) {
+            QFile file(path);
+            if (!file.open(QIODevice::ReadOnly)) throw QStringLiteral("无法读取差异原文件：") + file.errorString();
+            oldBytes = file.readAll();
+        } else oldBytes = readRemote(path);
         auto *dialog = new QDialog(this);
         dialog->setAttribute(Qt::WA_DeleteOnClose);
         dialog->setWindowTitle(args.value("title").toString(QStringLiteral("建议更改：") + QFileInfo(path).fileName()));
         dialog->resize(1100, 650);
         auto *layout = new QHBoxLayout(dialog);
-        auto *oldView = new QPlainTextEdit(dialog); oldView->setReadOnly(true); oldView->setPlainText(QString::fromUtf8(file.readAll()));
+        auto *oldView = new QPlainTextEdit(dialog); oldView->setReadOnly(true); oldView->setPlainText(QString::fromUtf8(oldBytes));
         auto *newView = new QPlainTextEdit(dialog); newView->setReadOnly(true); newView->setPlainText(args.value("newContent").toString());
         layout->addWidget(oldView); layout->addWidget(newView);
         dialog->show();
