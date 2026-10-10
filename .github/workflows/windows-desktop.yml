@@ -1,0 +1,60 @@
+name: Windows Desktop EXE Build
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'desktop-v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows:
+    name: Build Qt Windows EXE
+    runs-on: windows-2025
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Setup MSVC
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Install Qt
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: '6.8.3'
+          host: windows
+          target: desktop
+          arch: win64_msvc2022_64
+
+      - name: Configure Qt path
+        shell: pwsh
+        run: |
+          echo "QT_ROOT=$env:Qt6_DIR" >> $env:GITHUB_ENV
+
+      - name: Build desktop application
+        shell: pwsh
+        run: |
+          ./desktop/build_windows.ps1
+
+      - name: Package portable zip
+        shell: pwsh
+        run: |
+          Compress-Archive -Path desktop/dist/* -DestinationPath vscode-mcp-desktop-windows-x64.zip
+
+      - name: Upload EXE package
+        uses: actions/upload-artifact@v5
+        with:
+          name: vscode-mcp-desktop-windows-x64
+          path: vscode-mcp-desktop-windows-x64.zip
+
+      - name: Release desktop build
+        if: startsWith(github.ref, 'refs/tags/desktop-v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: vscode-mcp-desktop-windows-x64.zip
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
