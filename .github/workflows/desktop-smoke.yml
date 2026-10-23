@@ -35,14 +35,9 @@ jobs:
       - name: Configure and compile with VS 2022
         shell: pwsh
         run: |
-          $qtDir = $env:Qt6_DIR
-          if (!$qtDir) { throw "install-qt-action did not set Qt6_DIR" }
-          if (Test-Path (Join-Path $qtDir 'bin')) {
-            $prefix = $qtDir
-          } elseif (Test-Path (Join-Path $qtDir '..\..\..\bin')) {
-            $prefix = [IO.Path]::GetFullPath((Join-Path $qtDir '..\..\..'))
-          } else {
-            throw "Cannot resolve Qt installation from Qt6_DIR=$qtDir"
+          $prefix = $env:QT_ROOT_DIR
+          if (!$prefix -or !(Test-Path (Join-Path $prefix 'bin'))) {
+            throw "install-qt-action did not set a valid QT_ROOT_DIR"
           }
           cmake -S desktop -B desktop/build-ci -G "Visual Studio 17 2022" -A x64 "-DCMAKE_PREFIX_PATH=$prefix"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

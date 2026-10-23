@@ -33,8 +33,8 @@ $previousOrigins = $env:VSCODE_MCP_ALLOWED_ORIGINS
 $qtBin = 'C:\Qt\6.8.3\msvc2022_64\bin'
 if ($env:QT_ROOT -and (Test-Path (Join-Path $env:QT_ROOT 'bin'))) {
     $qtBin = Join-Path $env:QT_ROOT 'bin'
-} elseif ($env:Qt6_DIR -and (Test-Path (Join-Path $env:Qt6_DIR '..\..\..\bin'))) {
-    $qtBin = [IO.Path]::GetFullPath((Join-Path $env:Qt6_DIR '..\..\..\bin'))
+} elseif ($env:QT_ROOT_DIR -and (Test-Path (Join-Path $env:QT_ROOT_DIR 'bin'))) {
+    $qtBin = Join-Path $env:QT_ROOT_DIR 'bin'
 }
 if (!(Test-Path $qtBin)) { throw "Qt runtime DLLs not found; set QT_ROOT to the Qt install prefix" }
 $env:PATH = $qtBin + ';' + $env:PATH
