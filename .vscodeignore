@@ -1,5 +1,7 @@
 src/**
 node_modules/**
+# The Qt desktop app is distributed separately; never bundle builds/cache in VSIX.
+desktop/**
 .eslintrc.json
 tsconfig.json
 esbuild.config.js

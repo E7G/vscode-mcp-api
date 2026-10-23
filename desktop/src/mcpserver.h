@@ -7,6 +7,7 @@
 #include <QHash>
 #include <QStringList>
 #include <QJsonArray>
+#include <QElapsedTimer>
 #include <atomic>
 
 class QTcpSocket;
@@ -66,4 +67,8 @@ private:
     QHash<QString, QProcess *> terminals_;
     int port_ = 0;
     std::atomic<int> connections_{0};
+    QJsonArray toolHistory_;
+    qint64 successfulCalls_ = 0;
+    qint64 failedCalls_ = 0;
+    QElapsedTimer uptime_;
 };

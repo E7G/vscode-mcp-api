@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 4.2)
+cmake_minimum_required(VERSION 3.24)
 project(vscode_mcp_qt VERSION 3.1.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
@@ -13,6 +13,10 @@ qt_add_executable(vscode-mcp WIN32
     src/mainwindow.h
     src/mcpserver.cpp
     src/mcpserver.h
+    src/workspacetools.cpp
+    src/workspacetools.h
+    src/documenttools.cpp
+    src/documenttools.h
     src/editorbridge.cpp
     src/editorbridge.h
     src/languageservice.cpp
