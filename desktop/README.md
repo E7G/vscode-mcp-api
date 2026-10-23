@@ -24,6 +24,8 @@ Windows x64 原生 C++/Qt 6 应用。**运行不需要 VS Code、Node.js 或原�
 
 详细的已实现范围、明确限制、测试命令和后续阶段见 [IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md)。本机目录管理支持 `list_directory`、`get_file_info`、`read_multiple_files`、`create_directory`、`move_file`；`edit_block` 仅在 UTF-8 文本精确匹配时写入；`search_workspace` 支持文件名或文本检索及正则、通配符过滤。
 
+`edit_block` 新增 `dryRun=true` 不落盘预演、`expectedSha256` 防止陈旧版本覆盖；结果返回修改前后的 SHA-256。浏览器跨域访问默认拒绝：请在 GUI 的“允许的浏览器来源”填写需要授权的 HTTPS Origin（逗号分隔），同时设置 Bearer Token；headless 模式可使用 `VSCODE_MCP_ALLOWED_ORIGINS` 环境变量。默认不再返回 `Access-Control-Allow-Origin: *`。
+
 `read_document` 目前只支持 DOCX 段落文本、XLSX 第一工作表单元格以及通过外部 `pdftotext` 提取 PDF 文本；**尚不支持修改或创建 Office/PDF 文件**。SSH `register_device` / `list_devices` / `select_device` / `remove_device` 属于本机持久 SSH 配置档，并非 Commander 式云配对。Shell 命令具有当前 OS 用户权限，不属于文件工作区沙箱。
 
 无界面测试/服务模式：`vscode-mcp.exe --headless --workspace C:\\project --port 3333`。建议设置环境变量 `VSCODE_MCP_AUTH_TOKEN`；公网隧道启动现在要求在 GUI 中配置 Bearer Token。

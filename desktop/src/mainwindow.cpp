@@ -97,6 +97,7 @@ MainWindow::MainWindow(const QString &workspaceOverride, QWidget *parent) : QMai
     connect(sshHostEdit_, &QLineEdit::editingFinished, this, &MainWindow::saveSettings);
     connect(remoteRootEdit_, &QLineEdit::editingFinished, this, &MainWindow::saveSettings);
     connect(authTokenEdit_, &QLineEdit::editingFinished, this, &MainWindow::saveSettings);
+    connect(allowedOriginsEdit_, &QLineEdit::editingFinished, this, &MainWindow::saveSettings);
     connect(portSpin_, &QSpinBox::valueChanged, this, &MainWindow::saveSettings);
     connect(ngrokDomainEdit_, &QLineEdit::editingFinished, this, &MainWindow::saveSettings);
     connect(ngrokPathEdit_, &QLineEdit::editingFinished, this, &MainWindow::saveSettings);
@@ -153,7 +154,12 @@ void MainWindow::buildUi()
     endpointRow->addWidget(localUrl_,1); endpointRow->addWidget(copyLocal); endpointRow->addWidget(serverButton_); serverLayout->addLayout(endpointRow);
     auto *settings=new QFormLayout(); portSpin_=new QSpinBox(); portSpin_->setRange(1024,65535); portSpin_->setValue(saved.value("port",3333).toInt());
     authTokenEdit_=new QLineEdit(Credentials::readMcpToken()); authTokenEdit_->setEchoMode(QLineEdit::Password); authTokenEdit_->setPlaceholderText(QStringLiteral("留空仅本机访问免认证；公网建议设置"));
-    settings->addRow(QStringLiteral("MCP 端口"),portSpin_); settings->addRow(QStringLiteral("Bearer 访问令牌"),authTokenEdit_); serverLayout->addLayout(settings);
+    allowedOriginsEdit_ = new QLineEdit(saved.value("security/allowedOrigins").toString());
+    allowedOriginsEdit_->setPlaceholderText(QStringLiteral("例如 https://my-agent.example；逗号分隔，仅有 Bearer 才生效"));
+    settings->addRow(QStringLiteral("MCP 端口"),portSpin_);
+    settings->addRow(QStringLiteral("Bearer 访问令牌"),authTokenEdit_);
+    settings->addRow(QStringLiteral("允许的浏览器来源"),allowedOriginsEdit_);
+    serverLayout->addLayout(settings);
     layout->addWidget(serverCard);
 
     auto *ngrokCard=card(root); auto *ngrokLayout=new QVBoxLayout(ngrokCard);
@@ -210,6 +216,7 @@ void MainWindow::saveSettings()
     s.setValue("sshHost",sshHostEdit_->text().trimmed());
     s.setValue("remoteRoot",remoteRootEdit_->text().trimmed());
     s.setValue("ngrokDomain",ngrokDomainEdit_->text()); s.setValue("ngrokExecutable",ngrokPathEdit_->text());
+    s.setValue("security/allowedOrigins",allowedOriginsEdit_->text().trimmed());
     if(themeCombo_) s.setValue("theme",themeCombo_->currentData().toString());
     s.sync();
     if (ngrokRunning_ && authTokenEdit_->text().trimmed().isEmpty()) {

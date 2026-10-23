@@ -29,8 +29,17 @@ New-Item -ItemType Directory (Join-Path $workspace 'sub') | Out-Null
 [IO.File]::WriteAllText((Join-Path $workspace 'sub\match.txt'), 'needle', [Text.UTF8Encoding]::new($false))
 $originalPath = $env:PATH
 $previousToken = $env:VSCODE_MCP_AUTH_TOKEN
-$env:PATH = 'C:\Qt\6.8.3\msvc2022_64\bin;' + $env:PATH
+$previousOrigins = $env:VSCODE_MCP_ALLOWED_ORIGINS
+$qtBin = 'C:\Qt\6.8.3\msvc2022_64\bin'
+if ($env:QT_ROOT -and (Test-Path (Join-Path $env:QT_ROOT 'bin'))) {
+    $qtBin = Join-Path $env:QT_ROOT 'bin'
+} elseif ($env:Qt6_DIR -and (Test-Path (Join-Path $env:Qt6_DIR '..\..\..\bin'))) {
+    $qtBin = [IO.Path]::GetFullPath((Join-Path $env:Qt6_DIR '..\..\..\bin'))
+}
+if (!(Test-Path $qtBin)) { throw "Qt runtime DLLs not found; set QT_ROOT to the Qt install prefix" }
+$env:PATH = $qtBin + ';' + $env:PATH
 $env:VSCODE_MCP_AUTH_TOKEN = 'smoke-test-token'
+$env:VSCODE_MCP_ALLOWED_ORIGINS = 'https://trusted.example'
 $proc = $null
 $passed = 0
 function Assert($truth, [string]$label) {
@@ -68,6 +77,20 @@ try {
     } catch {
         Assert ($_.Exception.Message -match '401|Unauthorized') 'Bearer authentication'
     }
+    try {
+        Invoke-WebRequest -UseBasicParsing -Uri "http://127.0.0.1:$Port/mcp" -Method Options -Headers @{Origin='https://untrusted.example';'Access-Control-Request-Method'='POST'} -ErrorAction Stop | Out-Null
+        throw 'untrusted origin preflight unexpectedly succeeded'
+    } catch {
+        Assert ($_.Exception.Message -match '403|Forbidden') 'cross-origin preflight rejected'
+    }
+    $preflight = Invoke-WebRequest -UseBasicParsing -Uri "http://127.0.0.1:$Port/mcp" -Method Options -Headers @{Origin='https://trusted.example';'Access-Control-Request-Method'='POST'} -ErrorAction Stop
+    Assert ($preflight.Headers['Access-Control-Allow-Origin'] -eq 'https://trusted.example') 'configured browser origin allowed'
+    try {
+        Invoke-WebRequest -UseBasicParsing -Uri "http://127.0.0.1:$Port/mcp" -Method Post -Headers @{Authorization='Bearer smoke-test-token';Origin='https://untrusted.example'} -ContentType 'application/json' -Body '{"jsonrpc":"2.0","id":5,"method":"ping"}' -ErrorAction Stop | Out-Null
+        throw 'untrusted browser origin unexpectedly succeeded'
+    } catch {
+        Assert ($_.Exception.Message -match '403|Forbidden') 'untrusted browser request rejected despite bearer'
+    }
     $list = Invoke-RestMethod -Uri "http://127.0.0.1:$Port/mcp" -Method Post -Headers @{Authorization = 'Bearer smoke-test-token'} -ContentType 'application/json' -Body '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
     Assert (($list.result.tools.name -contains 'edit_block') -and ($list.result.tools.name -contains 'search_workspace')) 'new tools registered'
     $dir = Rpc 'list_directory' @{depth=2}
@@ -81,6 +104,13 @@ try {
     Assert ([IO.File]::ReadAllText((Join-Path $workspace 'sample.txt')).Contains('alpha')) 'failed edit did not mutate file'
     $edit = Rpc 'edit_block' @{filePath='sample.txt'; old_string='alpha'; new_string='changed'}
     Assert ((!$edit.error) -and ($edit.data.replacements -eq 1)) 'atomic edit'
+    $preview = Rpc 'edit_block' @{filePath='sample.txt'; old_string='changed'; new_string='staged'; dryRun=$true}
+    Assert ((!$preview.error) -and $preview.data.dryRun -and $preview.data.oldSha256.Length -eq 64) 'SHA-256 edit preview'
+    Assert ([IO.File]::ReadAllText((Join-Path $workspace 'sample.txt')).Contains('changed')) 'preview leaves file untouched'
+    $stale = Rpc 'edit_block' @{filePath='sample.txt'; old_string='changed'; new_string='staged'; expectedSha256=('0' * 64)}
+    Assert $stale.error 'stale edit revision rejected'
+    $versioned = Rpc 'edit_block' @{filePath='sample.txt'; old_string='changed'; new_string='staged'; expectedSha256=$preview.data.oldSha256}
+    Assert ((!$versioned.error) -and $versioned.data.newSha256 -eq $preview.data.newSha256) 'matching revision safely edited'
     $word = Rpc 'read_document' @{filePath='sample.docx'}
     Assert ((!$word.error) -and $word.data.text.Contains('Hello DOCX')) 'DOCX text extraction'
     $excel = Rpc 'read_document' @{filePath='sample.xlsx'}
@@ -130,5 +160,6 @@ try {
     if ($proc -and !$proc.HasExited) { Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue }
     $env:PATH = $originalPath
     $env:VSCODE_MCP_AUTH_TOKEN = $previousToken
+    $env:VSCODE_MCP_ALLOWED_ORIGINS = $previousOrigins
     Remove-Item -LiteralPath $workspace -Recurse -Force -ErrorAction SilentlyContinue
 }
