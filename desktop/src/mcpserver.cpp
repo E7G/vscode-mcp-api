@@ -172,11 +172,38 @@ void McpServer::handleRequest(QTcpSocket *socket, const QByteArray &request)
     const QByteArray method = parts.value(0);
     const QByteArray path = parts.value(1);
     QByteArray authorization;
+    QByteArray origin;
+    bool originPresent = false;
     for (const QByteArray &line : header.split('\n')) {
         const QByteArray low = line.trimmed().toLower();
         if (low.startsWith("authorization:")) authorization = line.trimmed().mid(14).trimmed();
+        if (low.startsWith("origin:")) {
+            if (originPresent) { sendHttp(socket, 403, "{\"error\":\"duplicate origin header\"}"); return; }
+            originPresent = true;
+            origin = line.trimmed().mid(7).trimmed();
+        }
     }
-    if (method == "OPTIONS") { sendHttp(socket, 204, ""); return; }
+    // MCP can run commands as the logged-in user. Cross-origin browser requests
+    // must never be allowed by default (including OPTIONS preflights).
+    if (originPresent) {
+        const QString originValue = QString::fromLatin1(origin);
+        const bool loopbackOrigin = originValue == QStringLiteral("http://127.0.0.1:%1").arg(port_) ||
+                                    originValue == QStringLiteral("http://localhost:%1").arg(port_);
+        bool explicitlyAllowed = false;
+        if (!authToken_.isEmpty()) {
+            const QString rawAllowlist = QSettings().value(QStringLiteral("security/allowedOrigins")).toString() +
+                QLatin1Char(',') + qEnvironmentVariable("VSCODE_MCP_ALLOWED_ORIGINS");
+            for (const QString &entry : rawAllowlist.split(',', Qt::SkipEmptyParts)) {
+                const QString candidate = entry.trimmed();
+                if (!candidate.isEmpty() && candidate == originValue) { explicitlyAllowed = true; break; }
+            }
+        }
+        if ((!loopbackOrigin && !explicitlyAllowed) || origin.isEmpty()) {
+            sendHttp(socket, 403, "{\"error\":\"origin forbidden\"}"); return;
+        }
+        socket->setProperty("approvedOrigin", origin);
+    }
+    if (method == "OPTIONS" && path == "/mcp") { sendHttp(socket, 204, ""); return; }
     if (path == "/health" && method == "GET") {
         const QJsonObject health{{"status", "ok"}, {"version", APP_VERSION},
                                  {"activeRequests", connectionCount()}, {"port", port_}};
@@ -203,12 +230,18 @@ void McpServer::handleRequest(QTcpSocket *socket, const QByteArray &request)
 void McpServer::sendHttp(QTcpSocket *socket, int status, const QByteArray &body, const QByteArray &contentType)
 {
     static const QHash<int, QByteArray> statusText{{200,"OK"},{202,"Accepted"},{204,"No Content"},
-        {400,"Bad Request"},{401,"Unauthorized"},{404,"Not Found"},{405,"Method Not Allowed"},
+        {400,"Bad Request"},{401,"Unauthorized"},{403,"Forbidden"},{404,"Not Found"},{405,"Method Not Allowed"},
         {411,"Length Required"},{413,"Payload Too Large"},{500,"Internal Server Error"}};
     QByteArray response = "HTTP/1.1 " + QByteArray::number(status) + " " + statusText.value(status, "OK") + "\r\n";
     response += "Content-Type: " + contentType + "\r\nContent-Length: " + QByteArray::number(body.size()) + "\r\n";
-    response += "Access-Control-Allow-Origin: *\r\nAccess-Control-Allow-Headers: Content-Type, Authorization, MCP-Protocol-Version\r\n";
-    response += "Access-Control-Allow-Methods: GET, POST, DELETE, OPTIONS\r\nConnection: close\r\n\r\n" + body;
+    response += "Vary: Origin\r\n";
+    const QByteArray approvedOrigin = socket->property("approvedOrigin").toByteArray();
+    if (!approvedOrigin.isEmpty()) {
+        response += "Access-Control-Allow-Origin: " + approvedOrigin + "\r\n";
+        response += "Access-Control-Allow-Headers: Content-Type, Authorization, MCP-Protocol-Version\r\n";
+        response += "Access-Control-Allow-Methods: POST, OPTIONS\r\n";
+    }
+    response += "X-Content-Type-Options: nosniff\r\nConnection: close\r\n\r\n" + body;
     socket->write(response); socket->disconnectFromHost();
     QTimer::singleShot(5000, socket, [socket]() { if (socket->state() != QAbstractSocket::UnconnectedState) socket->abort(); });
 }
@@ -294,7 +327,7 @@ QJsonArray McpServer::toolList() const
     add("read_multiple_files", "批量读取至多 20 个 UTF-8 文件", schema({{"paths",QJsonObject{{"type","array"},{"items",QJsonObject{{"type","string"}}}}}}, {"paths"}));
     add("create_directory", "在工作区内创建目录", schema({{"path",str("目录路径")}}, {"path"}));
     add("move_file", "移动或重命名文件或目录（不覆盖）", schema({{"source",str("源路径")},{"destination",str("目标路径")}}, {"source","destination"}));
-    add("edit_block", "精确局部替换，校验匹配次数后原子写入", schema({{"filePath",str("UTF-8 文件路径")},{"old_string",str("被替换文本")},{"new_string",str("新文本")},{"expected_replacements",num("预期匹配次数，默认 1")}}, {"filePath","old_string","new_string"}));
+    add("edit_block", "支持 SHA-256 版本校验、预演与精确局部替换，实际写入使用原子文件", schema({{"filePath",str("UTF-8 文件路径")},{"old_string",str("被替换文本")},{"new_string",str("新文本")},{"expected_replacements",num("预期匹配次数，默认 1")},{"expectedSha256",str("文件现有 SHA-256，用于避免陈旧编辑")},{"dryRun",boolean("只预演替换，不修改文件")}}, {"filePath","old_string","new_string"}));
     add("search_workspace", "搜索文件名或文本，支持正则和过滤，限制扫描量", schema({{"path",str("搜索目录")},{"pattern",str("搜索词")},{"searchType",str("files 或 content，默认 content")},{"regex",boolean("是否正则")},{"ignoreCase",boolean("忽略大小写")},{"filePattern",str("文件通配符")},{"maxResults",num("最大结果数，最多 500")},{"maxFiles",num("最大扫描文件数")}}, {"pattern"}));
     add("get_recent_tool_calls", "查看不含敏感参数的本次运行工具调用摘要", schema({{"maxResults",num("最多返回 200 条")}}));
     add("get_usage_stats", "本次运行 MCP 调用成功/失败和运行时长", schema({}));

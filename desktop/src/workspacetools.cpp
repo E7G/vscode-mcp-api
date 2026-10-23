@@ -1,6 +1,7 @@
 #include "workspacetools.h"
 
 #include <QDateTime>
+#include <QCryptographicHash>
 #include <QDir>
 #include <QDirIterator>
 #include <QElapsedTimer>
@@ -157,16 +158,35 @@ QJsonValue WorkspaceTools::call(const QString &name, const QJsonObject &args,
         const int expected = args.value("expected_replacements").toInt(1);
         if (oldText.isEmpty() || expected < 1 || expected > 10000)
             throw QStringLiteral("old_string 不能为空；expected_replacements 须为正整数");
-        const QString content = decodeUtf8(readBounded(path, 8 * 1024 * 1024));
+        const QByteArray originalBytes = readBounded(path, 8 * 1024 * 1024);
+        const QString originalHash = QString::fromLatin1(QCryptographicHash::hash(originalBytes, QCryptographicHash::Sha256).toHex());
+        const QString expectedHash = args.value("expectedSha256").toString().trimmed().toLower();
+        if (args.contains("expectedSha256")) {
+            static const QRegularExpression shaPattern(QStringLiteral("^[0-9a-f]{64}$"));
+            if (!shaPattern.match(expectedHash).hasMatch()) throw QStringLiteral("expectedSha256 必须是 64 位十六进制 SHA-256");
+            if (expectedHash != originalHash) throw QStringLiteral("版本冲突：文件 SHA-256 与 expectedSha256 不一致，未修改文件");
+        }
+        const QString content = decodeUtf8(originalBytes);
         const int matches = content.count(oldText, Qt::CaseSensitive);
         if (matches != expected)
             throw QStringLiteral("精确替换匹配数 %1，与预期 %2 不符；未修改文件").arg(matches).arg(expected);
         QString edited = content;
         edited.replace(oldText, newText, Qt::CaseSensitive);
+        const QByteArray updatedBytes = edited.toUtf8();
+        if (updatedBytes.size() > 8 * 1024 * 1024) throw QStringLiteral("编辑后的文件超过 8 MiB 大小限制");
+        const QString updatedHash = QString::fromLatin1(QCryptographicHash::hash(updatedBytes, QCryptographicHash::Sha256).toHex());
+        const bool dryRun = args.value("dryRun").toBool(false);
+        if (dryRun)
+            return QJsonObject{{"path", path}, {"dryRun", true}, {"replacements", matches},
+                               {"oldSha256", originalHash}, {"newSha256", updatedHash},
+                               {"bytesWritten", static_cast<qint64>(updatedBytes.size())}};
         guard(path, true);
+        if (readBounded(path, 8 * 1024 * 1024) != originalBytes)
+            throw QStringLiteral("写入前文件已被其他进程修改，已取消编辑");
         saveUtf8(path, edited);
-        return QJsonObject{{"path", path}, {"replacements", matches},
-                           {"bytesWritten", static_cast<qint64>(edited.toUtf8().size())}};
+        return QJsonObject{{"path", path}, {"dryRun", false}, {"replacements", matches},
+                           {"oldSha256", originalHash}, {"newSha256", updatedHash},
+                           {"bytesWritten", static_cast<qint64>(updatedBytes.size())}};
     }
     if (name == QStringLiteral("search_workspace")) {
         const QString root = guard(stringArg(args, "path").isEmpty() ? "." : stringArg(args, "path"), true);

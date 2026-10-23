@@ -1,0 +1,50 @@
+name: Desktop MCP smoke tests
+
+on:
+  pull_request:
+    paths:
+      - 'desktop/**'
+      - '.github/workflows/desktop-smoke.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'desktop/**'
+      - '.github/workflows/desktop-smoke.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows-smoke:
+    name: Qt Windows build and MCP smoke
+    runs-on: windows-2025
+    timeout-minutes: 30
+    steps:
+      - name: Check out sources
+        uses: actions/checkout@v5
+
+      - name: Install Qt MSVC x64
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: '6.8.3'
+          host: windows
+          target: desktop
+          arch: win64_msvc2022_64
+
+      - name: Configure and compile with VS 2022
+        shell: pwsh
+        run: |
+          $prefix = $env:QT_ROOT_DIR
+          if (!$prefix -or !(Test-Path (Join-Path $prefix 'bin'))) {
+            throw "install-qt-action did not set a valid QT_ROOT_DIR"
+          }
+          cmake -S desktop -B desktop/build-ci -G "Visual Studio 17 2022" -A x64 "-DCMAKE_PREFIX_PATH=$prefix"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cmake --build desktop/build-ci --config Release --parallel 4
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: End-to-end MCP smoke
+        shell: pwsh
+        run: |
+          ./desktop/tests/smoke.ps1 -Executable "$PWD/desktop/build-ci/Release/vscode-mcp.exe" -Port 39741

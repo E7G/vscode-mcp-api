@@ -61,6 +61,7 @@ private:
     QLineEdit *sshHostEdit_ = nullptr;
     QLineEdit *remoteRootEdit_ = nullptr;
     QLineEdit *authTokenEdit_ = nullptr;
+    QLineEdit *allowedOriginsEdit_ = nullptr;
     QLineEdit *ngrokTokenEdit_ = nullptr;
     QLineEdit *ngrokDomainEdit_ = nullptr;
     QLineEdit *ngrokPathEdit_ = nullptr;
