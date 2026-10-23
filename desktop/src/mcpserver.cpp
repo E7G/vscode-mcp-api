@@ -119,19 +119,43 @@ void McpServer::readRequest()
     buffer += socket->readAll();
     if (buffer.size() > 10 * 1024 * 1024) { sendHttp(socket, 413, "{\"error\":\"request too large\"}"); return; }
     const qsizetype headerEnd = buffer.indexOf("\r\n\r\n");
-    if (headerEnd < 0) { socket->setProperty("requestBuffer", buffer); return; }
+    if (headerEnd < 0) {
+        if (buffer.size() > 16 * 1024) { sendHttp(socket, 413, "{\"error\":\"headers too large\"}"); return; }
+        socket->setProperty("requestBuffer", buffer); return;
+    }
+    constexpr qsizetype maxRequestBytes = 10 * 1024 * 1024;
+    if (headerEnd > 16 * 1024) { sendHttp(socket, 413, "{\"error\":\"headers too large\"}"); return; }
     qsizetype bodyLength = 0;
+    bool hasLength = false;
     const QByteArray header = buffer.left(headerEnd);
     for (const QByteArray &line : header.split('\n')) {
         const QByteArray low = line.trimmed().toLower();
-        if (low.startsWith("content-length:")) bodyLength = low.mid(15).trimmed().toLongLong();
+        if (low.startsWith("transfer-encoding:")) {
+            sendHttp(socket, 400, "{\"error\":\"transfer encoding not supported\"}"); return;
+        }
+        if (low.startsWith("content-length:")) {
+            bool valid = false;
+            const QByteArray value = low.mid(15).trimmed();
+            const qlonglong parsed = value.toLongLong(&valid);
+            if (!valid || parsed < 0 || (hasLength && parsed != bodyLength)) {
+                sendHttp(socket, 400, "{\"error\":\"invalid content length\"}"); return;
+            }
+            bodyLength = parsed;
+            hasLength = true;
+        }
+    }
+    if (!hasLength && header.startsWith("POST ")) {
+        sendHttp(socket, 411, "{\"error\":\"content length required\"}"); return;
+    }
+    if (bodyLength > maxRequestBytes - headerEnd - 4) {
+        sendHttp(socket, 413, "{\"error\":\"request too large\"}"); return;
     }
     if (buffer.size() < headerEnd + 4 + bodyLength) {
         socket->setProperty("requestBuffer", buffer); return;
     }
     socket->setProperty("requestBuffer", QByteArray{});
     disconnect(socket, &QTcpSocket::readyRead, this, &McpServer::readRequest);
-    handleRequest(socket, buffer);
+    handleRequest(socket, buffer.left(headerEnd + 4 + bodyLength));
 }
 
 void McpServer::handleRequest(QTcpSocket *socket, const QByteArray &request)
@@ -148,7 +172,7 @@ void McpServer::handleRequest(QTcpSocket *socket, const QByteArray &request)
         if (low.startsWith("authorization:")) authorization = line.trimmed().mid(14).trimmed();
     }
     if (method == "OPTIONS") { sendHttp(socket, 204, ""); return; }
-    if (path == "/health") {
+    if (path == "/health" && method == "GET") {
         const QJsonObject health{{"status", "ok"}, {"version", APP_VERSION},
                                  {"activeRequests", connectionCount()}, {"port", port_}};
         sendHttp(socket, 200, QJsonDocument(health).toJson(QJsonDocument::Compact)); return;
@@ -175,7 +199,7 @@ void McpServer::sendHttp(QTcpSocket *socket, int status, const QByteArray &body,
 {
     static const QHash<int, QByteArray> statusText{{200,"OK"},{202,"Accepted"},{204,"No Content"},
         {400,"Bad Request"},{401,"Unauthorized"},{404,"Not Found"},{405,"Method Not Allowed"},
-        {413,"Payload Too Large"},{500,"Internal Server Error"}};
+        {411,"Length Required"},{413,"Payload Too Large"},{500,"Internal Server Error"}};
     QByteArray response = "HTTP/1.1 " + QByteArray::number(status) + " " + statusText.value(status, "OK") + "\r\n";
     response += "Content-Type: " + contentType + "\r\nContent-Length: " + QByteArray::number(body.size()) + "\r\n";
     response += "Access-Control-Allow-Origin: *\r\nAccess-Control-Allow-Headers: Content-Type, Authorization, MCP-Protocol-Version\r\n";
