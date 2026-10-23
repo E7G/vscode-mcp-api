@@ -212,6 +212,11 @@ void MainWindow::saveSettings()
     s.setValue("ngrokDomain",ngrokDomainEdit_->text()); s.setValue("ngrokExecutable",ngrokPathEdit_->text());
     if(themeCombo_) s.setValue("theme",themeCombo_->currentData().toString());
     s.sync();
+    if (ngrokRunning_ && authTokenEdit_->text().trimmed().isEmpty()) {
+        ngrok_->stop();
+        ngrokRunning_ = false;
+        appendLog(QStringLiteral("已移除 Bearer 令牌，自动关闭公网隧道以阻止匿名访问"));
+    }
     if (authTokenEdit_->text().trimmed().isEmpty()) Credentials::clearMcpToken();
     else { QString credentialError; if (!Credentials::writeMcpToken(authTokenEdit_->text().trimmed(),&credentialError)) appendLog(credentialError); }
     if (server_) {
@@ -265,7 +270,8 @@ void MainWindow::toggleNgrok()
     const QString token=ngrokTokenEdit_->text().trimmed();
     if (token.isEmpty()) { QMessageBox::information(this,QStringLiteral("需要 ngrok authtoken"),QStringLiteral("前往 ngrok.com 注册并获取 authtoken，然后粘贴到 Authtoken 栏。")); return; }
     if (authTokenEdit_->text().trimmed().isEmpty()) {
-        QMessageBox::warning(this,QStringLiteral("公网服务未启用认证"),QStringLiteral("ngrok 会把 MCP 服务公开到互联网。当前未设置 Bearer 访问令牌，任何知道公网地址的人都可能访问。将按原版行为继续启动；如需认证，请先设置访问令牌。"));
+        QMessageBox::warning(this,QStringLiteral("公网服务未启用认证"),QStringLiteral("ngrok 会把 MCP 服务公开到互联网。当前未设置 Bearer 访问令牌，任何知道公网地址的人都可能访问。已阻止启动，请先设置访问令牌。"));
+        return;
     }
     QString error;
     if (!Credentials::writeNgrokToken(token,&error)) { QMessageBox::warning(this,QStringLiteral("保存令牌失败"),error); return; }

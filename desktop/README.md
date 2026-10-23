@@ -1,6 +1,6 @@
 # 独立版 MCP 桌面应用（Qt Widgets）
 
-Windows x64 原生 C++/Qt 6 应用。**运行不需要 VS Code、Node.js 或原版扩展**。内置标签编辑器、托盘、深浅色主题、MCP HTTP、终端管理、Git 工具和 ngrok 隧道。保留原版 27 个 MCP 工具名，额外提供 `git_status`、`git_diff`。
+Windows x64 原生 C++/Qt 6 应用。**运行不需要 VS Code、Node.js 或原版扩展**。内置标签编辑器、托盘、深浅色主题、MCP HTTP、终端管理、Git 工具和 ngrok 隧道。保留原版 27 个 MCP 工具名，新增文件管理、局部编辑、搜索、终端会话、进程管理、文档文本提取、SSH 设备配置及调用统计等，当前共注册 **50 个 MCP 工具**。
 
 ## 使用
 
@@ -19,6 +19,16 @@ Windows x64 原生 C++/Qt 6 应用。**运行不需要 VS Code、Node.js 或原�
 ## 兼容范围
 
 本机工作区的定义、引用、悬停、符号、诊断、代码操作、重命名通过标准 LSP 实现。SSH 工作区目前支持文件与终端操作，**远端 LSP 工具尚未实现**。`search_workspace_symbols` 优先查已启动的本机语言服务，缺少服务时退化为文本搜索。`execute_vscode_command` 目前只映射保存、打开、关闭当前编辑器三个命令；任意 VS Code 扩展命令需要 VS Code 运行时，独立应用不提供。原版自动上下文推送和 Cloudflare/localtunnel 管理未移植。
+
+## 新增功能与阶段说明
+
+详细的已实现范围、明确限制、测试命令和后续阶段见 [IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md)。本机目录管理支持 `list_directory`、`get_file_info`、`read_multiple_files`、`create_directory`、`move_file`；`edit_block` 仅在 UTF-8 文本精确匹配时写入；`search_workspace` 支持文件名或文本检索及正则、通配符过滤。
+
+`read_document` 目前只支持 DOCX 段落文本、XLSX 第一工作表单元格以及通过外部 `pdftotext` 提取 PDF 文本；**尚不支持修改或创建 Office/PDF 文件**。SSH `register_device` / `list_devices` / `select_device` / `remove_device` 属于本机持久 SSH 配置档，并非 Commander 式云配对。Shell 命令具有当前 OS 用户权限，不属于文件工作区沙箱。
+
+无界面测试/服务模式：`vscode-mcp.exe --headless --workspace C:\\project --port 3333`。建议设置环境变量 `VSCODE_MCP_AUTH_TOKEN`；公网隧道启动现在要求在 GUI 中配置 Bearer Token。
+
+Linux/macOS 构建入口为 `desktop/build_unix.sh`，未在对应系统上执行验证，非 Windows 平台系统凭据存储亦待完善。
 
 ## VS2026 构建
 
